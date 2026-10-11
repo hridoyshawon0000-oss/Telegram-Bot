@@ -39,9 +39,12 @@ BOT_TOKEN = "8990092257:AAEjSow_PU3k3HEvDwjhD_Z8XcUyLZ9hcsc"
 API_ID = 33511945
 API_HASH = "d044392a17690c14ee5b4a23651a0700"
 
+# আপনার জেনারেট করা String Session এখানে যুক্ত করা হলো
+STRING_SESSION = "BQG2RvEAVVJuVtf1Rem5hsoaEIJoTmBtDZ0_l3exhFRpBNwr0erQWVTGT4izkeIy6EzPQlUg6bQwpJvOo-7PTEyiUgYsr7nJPjKUpE7s27umbfP0qAhy0cT42IbMOOt1FHx_4aVpB-lftHUXfs7yhU94Z63iNEzQFUhrUAZgKaieVj9kX643xv4HgHwOtHhGpg0PzHU3mcS_gh3WkSn1b7ahgDGJMHL3agj5uE4B0fZ04BNcXKNWoY_aex_UxZPwSg86andgQOyP7jGem_SNZy4s0w3VabJwl3SM-vSrKgRTfJnqd1nck0hi_TqoVal7ZcIiNVbrkbJyZ87QQsXXODjSXZ8QAAAAIL2oKZAA"
+
 ADMIN_ID = 8788804249
 BROADCAST_CHANNEL_ID = -1003785686277
-WELCOME_MEDIA_CHANNEL_ID = -1003345168634  # আপনার টার্গেট চ্যানেল আইডি এখানে সেট করা হলো
+WELCOME_MEDIA_CHANNEL_ID = -1003345168634  # আপনার টার্গেট প্রাইভেট চ্যানেল আইডি
 PODCAST_SOURCE_CHANNEL_ID = -1003345168634
 PODCAST_INVITE_LINK = "https://t.me/+J95hZDnKzcE0Njc0"
 
@@ -82,7 +85,7 @@ DEFAULT_BUTTONS = [
     (2, "🪧 𝐜0𝐧𝐭𝐚𝐜𝐭 𝐭0 𝐜𝐞0 0𝐰𝐧𝐞𝐫 📥", "https://t.me/ALVEE_BD"),
     (
         3,
-        "📲 ˢʰᵃʳᵉ ᴬⁿᴅ ᴬᴅᴅ ᴹ𝗲ᴍʙ𝐞𝐫ꜱ 🔰",
+        "📲 ˢʰᵃʳᵉ ᴬⁿᴅ ᴬᴅᴅ ᴹ𝐞ᴍʙ𝐞𝐫ꜱ 🔰",
         "https://t.me/share/url?url=https%3A%2F%2Ft.me%2FXMedia90_Bot%3Fstart%3Dstart",
     ),
 ]
@@ -722,18 +725,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 
-# Pyrogram function to scan old welcome photos/videos & podcast videos from target channel
+# Pyrogram function using USER STRING SESSION to scan private channel media
 async def scan_old_media_and_podcasts_pyrogram():
     try:
-        async with PyrogramClient("media_scanner_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as pyro_app:
-            logger.info("Starting scanning old media and podcasts from target channel using Pyrogram...")
-            
-            # ডায়ালগ ক্যাশ যুক্ত করা হলো যাতে প্রাইভেট চ্যানেলের PEER_ID_INVALID এরর না আসে
-            try:
-                async for dialog in pyro_app.get_dialogs():
-                    pass
-            except Exception:
-                pass
+        async with PyrogramClient("user_scanner_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION) as pyro_app:
+            logger.info("Starting scanning old media and podcasts using User Session...")
             
             try:
                 chat = await pyro_app.join_chat(PODCAST_INVITE_LINK)
@@ -771,9 +767,9 @@ async def scan_old_media_and_podcasts_pyrogram():
                         if cur.rowcount > 0:
                             podcast_count += 1
 
-            logger.info(f"Pyrogram scan completed! Added {welcome_count} welcome media & {podcast_count} podcast videos.")
+            logger.info(f"Pyrogram User Session scan completed! Added {welcome_count} welcome media & {podcast_count} podcast videos.")
     except Exception as e:
-        logger.error(f"Pyrogram scanning error: {e}")
+        logger.error(f"Pyrogram User Session scanning error: {e}")
 
 
 async def importpodcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
