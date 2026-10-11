@@ -82,7 +82,7 @@ DEFAULT_BUTTONS = [
     (2, "🪧 𝐜0𝐧𝐭𝐚𝐜𝐭 𝐭0 𝐜𝐞0 0𝐰𝐧𝐞𝐫 📥", "https://t.me/ALVEE_BD"),
     (
         3,
-        "📲 ˢʰᵃʳᵉ ᴬⁿᴅ ᴬᴅᴅ ᴹᵉᴍʙ𝐞𝐫ꜱ 🔰",
+        "📲 ˢʰᵃʳᵉ ᴬⁿᴅ ᴬᴅᴅ ᴹ𝗲ᴍʙ𝐞𝐫ꜱ 🔰",
         "https://t.me/share/url?url=https%3A%2F%2Ft.me%2FXMedia90_Bot%3Fstart%3Dstart",
     ),
 ]
@@ -727,6 +727,13 @@ async def scan_old_media_and_podcasts_pyrogram():
     try:
         async with PyrogramClient("media_scanner_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as pyro_app:
             logger.info("Starting scanning old media and podcasts from target channel using Pyrogram...")
+            
+            # ডায়ালগ ক্যাশ যুক্ত করা হলো যাতে প্রাইভেট চ্যানেলের PEER_ID_INVALID এরর না আসে
+            try:
+                async for dialog in pyro_app.get_dialogs():
+                    pass
+            except Exception:
+                pass
             
             try:
                 chat = await pyro_app.join_chat(PODCAST_INVITE_LINK)
