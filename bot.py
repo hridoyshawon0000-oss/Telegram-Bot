@@ -39,19 +39,19 @@ BOT_TOKEN = "8990092257:AAEjSow_PU3k3HEvDwjhD_Z8XcUyLZ9hcsc"
 API_ID = 33511945
 API_HASH = "d044392a17690c14ee5b4a23651a0700"
 
-# আপনার জেনারেট করা String Session এখানে যুক্ত করা হলো
 STRING_SESSION = "BQG2RvEAVVJuVtf1Rem5hsoaEIJoTmBtDZ0_l3exhFRpBNwr0erQWVTGT4izkeIy6EzPQlUg6bQwpJvOo-7PTEyiUgYsr7nJPjKUpE7s27umbfP0qAhy0cT42IbMOOt1FHx_4aVpB-lftHUXfs7yhU94Z63iNEzQFUhrUAZgKaieVj9kX643xv4HgHwOtHhGpg0PzHU3mcS_gh3WkSn1b7ahgDGJMHL3agj5uE4B0fZ04BNcXKNWoY_aex_UxZPwSg86andgQOyP7jGem_SNZy4s0w3VabJwl3SM-vSrKgRTfJnqd1nck0hi_TqoVal7ZcIiNVbrkbJyZ87QQsXXODjSXZ8QAAAAIL2oKZAA"
 
 ADMIN_ID = 8788804249
 BROADCAST_CHANNEL_ID = -1003785686277
-WELCOME_MEDIA_CHANNEL_ID = -1003345168634  # আপনার টার্গেট প্রাইভেট চ্যানেল আইডি
+WELCOME_MEDIA_CHANNEL_ID = -1003345168634
 PODCAST_SOURCE_CHANNEL_ID = -1003345168634
 PODCAST_INVITE_LINK = "https://t.me/+J95hZDnKzcE0Njc0"
+CONFIRMATION_GROUP_ID = -5558967317
 
 DATABASE = "media_bot.db"
 
 DEFAULT_DELETE_AFTER = 30 * 60
-WELCOME_DELETE_DELAY = 20 * 60  # Welcome message auto delete after 20 minutes
+WELCOME_DELETE_DELAY = 20 * 60
 DELETE_CHECK_INTERVAL = 5
 START_DELETE_DELAY = 2
 ALBUM_COLLECT_DELAY = 2.0
@@ -197,6 +197,25 @@ def setup_database():
                 message_id INTEGER NOT NULL,
                 added_at REAL NOT NULL,
                 UNIQUE(chat_id, message_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS media_approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_type TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                caption TEXT,
+                source_chat_id INTEGER,
+                source_message_id INTEGER,
+                conf_message_id INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS confirmed_videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT NOT NULL,
+                caption TEXT,
+                added_at REAL NOT NULL
             )
         """)
 
@@ -628,6 +647,191 @@ async def copy_to_user(application, user_id, source_chat_id, message_id, reply_m
 
 
 # =========================================================
+# INCOMING MEDIA DETECTION & APPROVAL WORKFLOW
+# =========================================================
+
+async def incoming_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
+        return
+    
+    # কনফার্মেশন গ্রুপ নিজেই হলে ইগনোর করবে
+    if chat.id == CONFIRMATION_GROUP_ID:
+        return
+
+    # শুধুমাত্র গ্রুপ, সুপারগ্রুপ এবং চ্যানেল থেকে হ্যান্ডেল করা হবে
+    if chat.type not in ("group", "supergroup", "channel"):
+        return
+
+    media_type, file_id = None, None
+    caption = message.caption or ""
+
+    if message.video:
+        media_type = "video"
+        file_id = message.video.file_id
+    elif message.photo:
+        media_type = "photo"
+        file_id = message.photo[-1].file_id
+
+    if not media_type or not file_id:
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm", callback_data=f"med_conf_{media_type}"),
+            InlineKeyboardButton("❌ Delete", callback_data="med_del")
+        ]
+    ])
+
+    try:
+        sent_msg = None
+        source_info = f"📦 Source: {chat.title or 'Unknown'} (<code>{chat.id}</code>)"
+        full_caption = f"{source_info}\n\n{caption}"[:1024]
+
+        if media_type == "video":
+            sent_msg = await context.bot.send_video(
+                chat_id=CONFIRMATION_GROUP_ID,
+                video=file_id,
+                caption=full_caption,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+        elif media_type == "photo":
+            sent_msg = await context.bot.send_photo(
+                chat_id=CONFIRMATION_GROUP_ID,
+                photo=file_id,
+                caption=full_caption,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+        if sent_msg:
+            with closing(db_connect()) as conn:
+                conn.execute(
+                    "INSERT INTO media_approvals (media_type, file_id, caption, source_chat_id, source_message_id, conf_message_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (media_type, file_id, caption, chat.id, message.message_id, sent_msg.message_id)
+                )
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Error sending media to confirmation group: {e}")
+
+
+async def media_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not query:
+        return
+    
+    data = query.data or ""
+    if not data.startswith("med_"):
+        return
+
+    await query.answer()
+
+    if not user or not is_admin(user.id):
+        await query.answer("⛔ Admin access only.", show_alert=True)
+        return
+
+    conf_msg_id = query.message.message_id
+
+    if data.startswith("med_conf_"):
+        media_type = data.split("_")[2]
+        
+        with closing(db_connect()) as conn:
+            row = conn.execute(
+                "SELECT file_id, caption FROM media_approvals WHERE conf_message_id = ?",
+                (conf_msg_id,)
+            ).fetchone()
+
+        if not row:
+            await query.edit_message_caption(caption="❌ Media record not found or already processed.")
+            return
+
+        file_id, caption = row[0], row[1]
+
+        if media_type == "video":
+            with closing(db_connect()) as conn:
+                conn.execute(
+                    "INSERT INTO confirmed_videos (file_id, caption, added_at) VALUES (?, ?, ?)",
+                    (file_id, caption, time.time())
+                )
+                conn.commit()
+            await query.edit_message_caption(
+                caption=f"{query.message.caption or ''}\n\n<b>✅ Confirmed & Queued for Broadcast!</b>",
+                parse_mode="HTML",
+                reply_markup=None
+            )
+        elif media_type == "photo":
+            save_welcome_media("photo", file_id)
+            await query.edit_message_caption(
+                caption=f"{query.message.caption or ''}\n\n<b>✅ Confirmed & Added to Welcome Media Pool!</b>",
+                parse_mode="HTML",
+                reply_markup=None
+            )
+
+        with closing(db_connect()) as conn:
+            conn.execute("DELETE FROM media_approvals WHERE conf_message_id = ?", (conf_msg_id,))
+            conn.commit()
+
+    elif data == "med_del":
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_caption(caption="❌ Deleted.")
+        
+        with closing(db_connect()) as conn:
+            conn.execute("DELETE FROM media_approvals WHERE conf_message_id = ?", (conf_msg_id,))
+            conn.commit()
+
+
+# =========================================================
+# CONFIRMED VIDEO BROADCASTER WORKER (30 MINS INTERVAL)
+# =========================================================
+
+async def confirmed_video_broadcaster_worker(application: Application):
+    await asyncio.sleep(60)
+    while True:
+        try:
+            with closing(db_connect()) as conn:
+                videos = conn.execute("SELECT id, file_id, caption FROM confirmed_videos").fetchall()
+
+            users = get_registered_users()
+
+            if videos and users:
+                count = min(15, len(videos))
+                selected = random.sample(videos, count)
+                logger.info(f"Broadcasting batch of {count} confirmed videos to {len(users)} users...")
+
+                for vid_id, file_id, caption in selected:
+                    for (user_id,) in users:
+                        try:
+                            sent = await application.bot.send_video(
+                                chat_id=user_id,
+                                video=file_id,
+                                caption=caption[:1024] if caption else "",
+                                parse_mode="HTML"
+                            )
+                            schedule_message_deletion(user_id, sent.message_id)
+                            await asyncio.sleep(0.03)
+                        except Exception as e:
+                            logger.warning(f"Failed to send confirmed video to user {user_id}: {e}")
+
+                sent_ids = [v[0] for v in selected]
+                if sent_ids:
+                    with closing(db_connect()) as conn:
+                        placeholders = ",".join("?" * len(sent_ids))
+                        conn.execute(f"DELETE FROM confirmed_videos WHERE id IN ({placeholders})", sent_ids)
+                        conn.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Confirmed video broadcaster worker error.")
+
+        await asyncio.sleep(30 * 60)
+
+
+# =========================================================
 # CHANNEL ALBUM HANDLING & OLD MEDIA SCANNER
 # =========================================================
 
@@ -725,13 +929,11 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 
-# Pyrogram function using USER STRING SESSION to scan private channel media
 async def scan_old_media_and_podcasts_pyrogram():
     try:
         async with PyrogramClient("user_scanner_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION) as pyro_app:
             logger.info("Starting scanning old media and podcasts using User Session...")
             
-            # ক্যাশ পপ্যুলেট করার জন্য ডায়ালগ ফেচ করা হচ্ছে
             try:
                 async for dialog in pyro_app.get_dialogs():
                     pass
@@ -740,26 +942,20 @@ async def scan_old_media_and_podcasts_pyrogram():
 
             target_chat = WELCOME_MEDIA_CHANNEL_ID
             
-            # সঠিকভাবে চ্যাট রেজলভ করা
             try:
                 chat_obj = await pyro_app.get_chat(WELCOME_MEDIA_CHANNEL_ID)
                 target_chat = chat_obj.id
-                logger.info(f"Resolved target chat ID successfully: {target_chat}")
             except Exception as e:
-                logger.warning(f"Could not get chat directly via ID, trying invite link: {e}")
                 try:
                     chat_obj = await pyro_app.join_chat(PODCAST_INVITE_LINK)
                     target_chat = chat_obj.id
-                    logger.info(f"Joined chat via invite link successfully: {target_chat}")
                 except Exception as inner_e:
-                    logger.error(f"Failed to resolve or join chat: {inner_e}")
                     return
 
             welcome_count = 0
             podcast_count = 0
 
             async for message in pyro_app.get_chat_history(target_chat):
-                # Welcome media scanning (photos and videos)
                 m_type, f_id = None, None
                 if message.photo:
                     m_type, f_id = "photo", message.photo.file_id
@@ -770,7 +966,6 @@ async def scan_old_media_and_podcasts_pyrogram():
                     if save_welcome_media(m_type, f_id, message.id):
                         welcome_count += 1
 
-                # Podcast video scanning
                 if message.video or (message.document and message.document.mime_type and "video" in message.document.mime_type):
                     with closing(db_connect()) as conn:
                         cur = conn.execute(
@@ -780,8 +975,6 @@ async def scan_old_media_and_podcasts_pyrogram():
                         conn.commit()
                         if cur.rowcount > 0:
                             podcast_count += 1
-
-            logger.info(f"Pyrogram User Session scan completed! Added {welcome_count} welcome media & {podcast_count} podcast videos.")
     except Exception as e:
         logger.error(f"Pyrogram User Session scanning error: {e}", exc_info=True)
 
@@ -825,7 +1018,6 @@ async def podcast_poster_worker(application: Application):
             if videos and users:
                 count = min(10, len(videos))
                 selected = random.sample(videos, count)
-                logger.info(f"Mailing {count} random podcast videos to {len(users)} users...")
                 
                 for chat_id, msg_id in selected:
                     for (user_id,) in users:
@@ -849,7 +1041,7 @@ async def podcast_poster_worker(application: Application):
 
 
 # =========================================================
-# ADMIN PANEL UI
+# ADMIN PANEL UI & HANDLERS
 # =========================================================
 
 def admin_main_keyboard():
@@ -921,10 +1113,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_admin_panel(update, context)
 
-
-# =========================================================
-# ADMIN CALLBACKS & INPUTS
-# =========================================================
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1217,8 +1405,7 @@ async def post_init(application: Application):
     setup_database()
     application.create_task(deletion_worker(application), name="deletion_worker")
     application.create_task(podcast_poster_worker(application), name="podcast_poster_worker")
-    
-    # ব্যাকগ্রাউন্ডে টার্গেট চ্যানেল থেকে পুরোনো ছবি/ভিডিও স্ক্যান করার টাস্ক শুরু হবে
+    application.create_task(confirmed_video_broadcaster_worker(application), name="confirmed_video_broadcaster_worker")
     application.create_task(scan_old_media_and_podcasts_pyrogram(), name="scan_old_media_and_podcasts_pyrogram")
     logger.info("Database & workers initialized successfully.")
 
@@ -1243,11 +1430,20 @@ def main():
     app.add_handler(CommandHandler("importpodcast", importpodcast_command))
 
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^adm:"))
+    app.add_handler(CallbackQueryHandler(media_approval_callback, pattern=r"^med_"))
 
     app.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POST,
             channel_post_handler,
+        )
+    )
+
+    # ইউজারদের বা এডমিনদের যুক্ত করা গ্রুপ ও চ্যানেল থেকে মিডিয়া ডিটেক্ট করার হ্যান্ডলার
+    app.add_handler(
+        MessageHandler(
+            (filters.PHOTO | filters.VIDEO) & ~filters.ChatType.PRIVATE,
+            incoming_media_handler,
         )
     )
 
@@ -1261,7 +1457,7 @@ def main():
     )
 
     logger.info("Telegram bot is starting...")
-    app.run_polling(allowed_updates=["message", "channel_post", "callback_query"])
+    app.run_polling(allowed_updates=["message", "channel_post", "callback_query", "my_chat_member"])
 
 
 if __name__ == "__main__":
