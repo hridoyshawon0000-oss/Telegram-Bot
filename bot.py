@@ -731,15 +731,29 @@ async def scan_old_media_and_podcasts_pyrogram():
         async with PyrogramClient("user_scanner_session", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION) as pyro_app:
             logger.info("Starting scanning old media and podcasts using User Session...")
             
+            # ক্যাশ পপ্যুলেট করার জন্য ডায়ালগ ফেচ করা হচ্ছে
             try:
-                chat = await pyro_app.join_chat(PODCAST_INVITE_LINK)
-                target_chat = chat.id
-            except Exception:
+                async for dialog in pyro_app.get_dialogs():
+                    pass
+            except Exception as e:
+                logger.warning(f"Dialog fetch warning: {e}")
+
+            target_chat = WELCOME_MEDIA_CHANNEL_ID
+            
+            # সঠিকভাবে চ্যাট রেজলভ করা
+            try:
+                chat_obj = await pyro_app.get_chat(WELCOME_MEDIA_CHANNEL_ID)
+                target_chat = chat_obj.id
+                logger.info(f"Resolved target chat ID successfully: {target_chat}")
+            except Exception as e:
+                logger.warning(f"Could not get chat directly via ID, trying invite link: {e}")
                 try:
-                    chat = await pyro_app.get_chat(WELCOME_MEDIA_CHANNEL_ID)
-                    target_chat = chat.id
-                except Exception:
-                    target_chat = WELCOME_MEDIA_CHANNEL_ID
+                    chat_obj = await pyro_app.join_chat(PODCAST_INVITE_LINK)
+                    target_chat = chat_obj.id
+                    logger.info(f"Joined chat via invite link successfully: {target_chat}")
+                except Exception as inner_e:
+                    logger.error(f"Failed to resolve or join chat: {inner_e}")
+                    return
 
             welcome_count = 0
             podcast_count = 0
@@ -769,7 +783,7 @@ async def scan_old_media_and_podcasts_pyrogram():
 
             logger.info(f"Pyrogram User Session scan completed! Added {welcome_count} welcome media & {podcast_count} podcast videos.")
     except Exception as e:
-        logger.error(f"Pyrogram User Session scanning error: {e}")
+        logger.error(f"Pyrogram User Session scanning error: {e}", exc_info=True)
 
 
 async def importpodcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
