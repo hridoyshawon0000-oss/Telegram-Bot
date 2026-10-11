@@ -34,7 +34,7 @@ from telegram.ext import (
 # CONFIGURATION
 # =========================================================
 
-BOT_TOKEN = "8990092257:AAEjSow_PU3k3HEvDwjhD_Z8XcUyLZ9hcsc"
+BOT_TOKEN = "8990092257:AAHXo4A0UtY9qPnoEO2y06r06gZzlaoFYqA"
 
 API_ID = 33511945
 API_HASH = "d044392a17690c14ee5b4a23651a0700"
