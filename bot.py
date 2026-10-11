@@ -41,7 +41,7 @@ API_HASH = "d044392a17690c14ee5b4a23651a0700"
 
 ADMIN_ID = 8788804249
 BROADCAST_CHANNEL_ID = -1003785686277
-WELCOME_MEDIA_CHANNEL_ID = -1004210464553
+WELCOME_MEDIA_CHANNEL_ID = -1003345168634  # আপনার টার্গেট চ্যানেল আইডি এখানে সেট করা হলো
 PODCAST_SOURCE_CHANNEL_ID = -1003345168634
 PODCAST_INVITE_LINK = "https://t.me/+J95hZDnKzcE0Njc0"
 
@@ -88,7 +88,7 @@ DEFAULT_BUTTONS = [
 ]
 
 PODCAST_BUTTON = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔞ꜱʜᴀʀᴇ 𝐭𝐡𝐞 𝐯ɪᴅ𝐞𝐨ꜱ", url="https://t.me/share/url?url=https://t.me/XMedia90_Bot?start=start")]
+    [InlineKeyboardButton("🔞ꜱʜᴀʀᴇ 𝐭𝐡𝐞 𝐯ɪᴅ𝐞𝖔ꜱ", url="https://t.me/share/url?url=https://t.me/XMedia90_Bot?start=start")]
 ])
 
 logging.basicConfig(
@@ -462,7 +462,6 @@ async def delete_previous_welcome(bot, user_id):
         return
     chat_id, message_id = previous
     
-    # Remove from scheduled deletions to avoid duplicate deletion errors
     remove_scheduled_deletion(chat_id, message_id)
     
     try:
@@ -494,7 +493,6 @@ def format_welcome_text(raw_text, user):
 
 
 async def send_welcome(bot, chat_id, user):
-    welcome_type = db_get_setting("welcome_type", "text")
     welcome_text = db_get_setting("welcome_text", DEFAULT_WELCOME)
     formatted = format_welcome_text(welcome_text, user)
     keyboard = make_welcome_keyboard()
@@ -514,16 +512,6 @@ async def send_welcome(bot, chat_id, user):
                     chat_id=chat_id, video=file_id, caption=formatted[:1024],
                     parse_mode="HTML", reply_markup=keyboard,
                 )
-        elif welcome_type == "photo" and db_get_setting("welcome_file_id", ""):
-            sent = await bot.send_photo(
-                chat_id=chat_id, photo=db_get_setting("welcome_file_id", ""),
-                caption=formatted[:1024], parse_mode="HTML", reply_markup=keyboard,
-            )
-        elif welcome_type == "video" and db_get_setting("welcome_file_id", ""):
-            sent = await bot.send_video(
-                chat_id=chat_id, video=db_get_setting("welcome_file_id", ""),
-                caption=formatted[:1024], parse_mode="HTML", reply_markup=keyboard,
-            )
         else:
             sent = await bot.send_message(
                 chat_id=chat_id, text=formatted[:4096], parse_mode="HTML",
@@ -541,7 +529,6 @@ async def send_welcome(bot, chat_id, user):
     if sent:
         save_previous_welcome(user.id, chat_id, sent.message_id)
         
-        # Schedule welcome message deletion after 20 minutes
         delete_at = time.time() + WELCOME_DELETE_DELAY
         with closing(db_connect()) as conn:
             conn.execute(
@@ -638,7 +625,7 @@ async def copy_to_user(application, user_id, source_chat_id, message_id, reply_m
 
 
 # =========================================================
-# CHANNEL ALBUM HANDLING & OLD VIDEO SCANNER
+# CHANNEL ALBUM HANDLING & OLD MEDIA SCANNER
 # =========================================================
 
 def get_album_buffer(application):
@@ -683,6 +670,12 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     application = context.application
 
+    if message.chat_id == WELCOME_MEDIA_CHANNEL_ID:
+        media_type, file_id = get_channel_media(message)
+        if media_type and file_id:
+            save_welcome_media(media_type, file_id, message.message_id)
+            logger.info("Saved Welcome media from channel %s", message.chat_id)
+
     if message.chat_id == PODCAST_SOURCE_CHANNEL_ID:
         if message.video or (message.document and message.document.mime_type and "video" in message.document.mime_type):
             with closing(db_connect()) as conn:
@@ -692,13 +685,6 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 conn.commit()
             logger.info("Saved new podcast video from channel %s", message.chat_id)
-        return
-
-    if message.chat_id == WELCOME_MEDIA_CHANNEL_ID:
-        media_type, file_id = get_channel_media(message)
-        if media_type and file_id:
-            save_welcome_media(media_type, file_id, message.message_id)
-            logger.info("Saved Welcome media from channel %s", message.chat_id)
         return
 
     if message.chat_id != BROADCAST_CHANNEL_ID:
@@ -722,7 +708,6 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # Direct broadcast channel post handler to users
     users = get_registered_users()
     for (user_id,) in users:
         try:
@@ -737,34 +722,49 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
 
 
-# Pyrogram function to scan old videos using invite link
-async def scan_old_podcast_videos_pyrogram():
+# Pyrogram function to scan old welcome photos/videos & podcast videos from target channel
+async def scan_old_media_and_podcasts_pyrogram():
     try:
-        async with PyrogramClient("podcast_scanner_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as pyro_app:
-            logger.info("Starting scanning old podcast videos from source channel using Pyrogram...")
+        async with PyrogramClient("media_scanner_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as pyro_app:
+            logger.info("Starting scanning old media and podcasts from target channel using Pyrogram...")
             
             try:
                 chat = await pyro_app.join_chat(PODCAST_INVITE_LINK)
                 target_chat = chat.id
             except Exception:
                 try:
-                    chat = await pyro_app.get_chat(PODCAST_SOURCE_CHANNEL_ID)
+                    chat = await pyro_app.get_chat(WELCOME_MEDIA_CHANNEL_ID)
                     target_chat = chat.id
                 except Exception:
-                    target_chat = PODCAST_SOURCE_CHANNEL_ID
+                    target_chat = WELCOME_MEDIA_CHANNEL_ID
 
-            count = 0
+            welcome_count = 0
+            podcast_count = 0
+
             async for message in pyro_app.get_chat_history(target_chat):
+                # Welcome media scanning (photos and videos)
+                m_type, f_id = None, None
+                if message.photo:
+                    m_type, f_id = "photo", message.photo.file_id
+                elif message.video:
+                    m_type, f_id = "video", message.video.file_id
+                
+                if m_type and f_id:
+                    if save_welcome_media(m_type, f_id, message.id):
+                        welcome_count += 1
+
+                # Podcast video scanning
                 if message.video or (message.document and message.document.mime_type and "video" in message.document.mime_type):
                     with closing(db_connect()) as conn:
                         cur = conn.execute(
                             "INSERT OR IGNORE INTO podcast_videos (chat_id, message_id, added_at) VALUES (?, ?, ?)",
-                            (PODCAST_SOURCE_CHANNEL_ID, message.id, time.time())
+                            (WELCOME_MEDIA_CHANNEL_ID, message.id, time.time())
                         )
                         conn.commit()
                         if cur.rowcount > 0:
-                            count += 1
-            logger.info(f"Pyrogram scan completed! Successfully added {count} old videos to the database.")
+                            podcast_count += 1
+
+            logger.info(f"Pyrogram scan completed! Added {welcome_count} welcome media & {podcast_count} podcast videos.")
     except Exception as e:
         logger.error(f"Pyrogram scanning error: {e}")
 
@@ -777,25 +777,25 @@ async def importpodcast_command(update: Update, context: ContextTypes.DEFAULT_TY
             await message.reply_text("⛔ Admin access only.")
         return
 
-    status_msg = await message.reply_text("⏳ Scanning and analyzing old videos from the podcast channel... Please wait.")
+    status_msg = await message.reply_text("⏳ Scanning and analyzing old media and videos from the target channel... Please wait.")
     
     try:
-        await scan_old_podcast_videos_pyrogram()
+        await scan_old_media_and_podcasts_pyrogram()
         with closing(db_connect()) as conn:
-            total_saved = conn.execute("SELECT COUNT(*) FROM podcast_videos").fetchone()[0]
+            total_welcome = conn.execute("SELECT COUNT(*) FROM welcome_media").fetchone()[0]
+            total_podcast = conn.execute("SELECT COUNT(*) FROM podcast_videos").fetchone()[0]
             
         await status_msg.edit_text(
-            f"✅ Podcast scan and analysis completed!\n\n"
-            f"📊 Total podcast videos currently in database: <b>{total_saved}</b>\n\n"
-            f"ℹ️ 10 random videos will be sent directly to users every 30 minutes.",
+            f"✅ Scan and analysis completed successfully!\n\n"
+            f"🖼️ Total Welcome Media (Photos/Videos): <b>{total_welcome}</b>\n"
+            f"🎬 Total Podcast Videos in database: <b>{total_podcast}</b>",
             parse_mode="HTML"
         )
     except Exception as e:
-        logger.exception("Import podcast error.")
+        logger.exception("Import media/podcast error.")
         await status_msg.edit_text(f"❌ An error occurred during scanning: {e}")
 
 
-# Background worker to post 10 random videos directly to users every 30 minutes
 async def podcast_poster_worker(application: Application):
     await asyncio.sleep(20)
     while True:
@@ -840,7 +840,7 @@ def admin_main_keyboard():
         [InlineKeyboardButton("➕ Add Admin", callback_data="adm:add_admin")],
         [InlineKeyboardButton("👥 Total Members", callback_data="adm:members")],
         [InlineKeyboardButton("🔘 Welcome Message Buttons", callback_data="adm:welcome_buttons")],
-        [InlineKeyboardButton("✍️ Changing Welcome Message", callback_data="adm:welcome_message")],
+        [InlineKeyboardButton("📊 Media Pool Stats", callback_data="adm:mediastats")],
         [InlineKeyboardButton("🚫 Ban Users", callback_data="adm:ban_menu")],
         [InlineKeyboardButton("⏱ Broadcast Deleting Time", callback_data="adm:delete_time")],
         [InlineKeyboardButton("🛡️ Admin List", callback_data="adm:admin_list")],
@@ -950,6 +950,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit_admin_page(query, text)
         return
 
+    if data == "adm:mediastats":
+        with closing(db_connect()) as conn:
+            total_wm = conn.execute("SELECT COUNT(*) FROM welcome_media").fetchone()[0]
+        await edit_admin_page(query, f"📊 <b>WELCOME MEDIA POOL STATS</b>\n\nTotal cached photos/videos for welcome message: <b>{total_wm}</b>")
+        return
+
     if data == "adm:welcome_buttons":
         rows = []
         for slot, label, _url in get_welcome_buttons():
@@ -977,14 +983,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await edit_admin_page(
             query,
             f"✏️ <b>EDIT WELCOME BUTTON {slot}</b>\n\nSend the new button name first.\nThen the bot will ask you for the URL.\n\nSend /cancel to cancel.",
-        )
-        return
-
-    if data == "adm:welcome_message":
-        context.user_data["admin_action"] = "welcome_message"
-        await edit_admin_page(
-            query,
-            "✍️ <b>CHANGE WELCOME MESSAGE</b>\n\nSend text, photo, or video.\n\nSend /cancel to cancel.",
         )
         return
 
@@ -1071,20 +1069,6 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     action = context.user_data.get("admin_action")
-    if action == "import_media":
-        media_type = None
-        file_id = None
-        if message.photo:
-            media_type, file_id = "photo", message.photo[-1].file_id
-        elif message.video:
-            media_type, file_id = "video", message.video.file_id
-        if not media_type or not file_id:
-            await message.reply_text("❌ Please forward/send a photo or video from the channel.")
-            return
-        added = save_welcome_media(media_type, file_id, getattr(message, "message_id", None))
-        await message.reply_text("✅ Media added to welcome pool." if added else "ℹ️ Already in pool.")
-        return
-
     if not action:
         return
 
@@ -1122,27 +1106,6 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(f"✅ Welcome button {slot} updated successfully.")
         return
 
-    if action == "welcome_message":
-        if message.photo:
-            db_set_setting("welcome_type", "photo")
-            db_set_setting("welcome_file_id", message.photo[-1].file_id)
-            db_set_setting("welcome_text", message.caption or "")
-        elif message.video:
-            db_set_setting("welcome_type", "video")
-            db_set_setting("welcome_file_id", message.video.file_id)
-            db_set_setting("welcome_text", message.caption or "")
-        elif message.text:
-            db_set_setting("welcome_type", "text")
-            db_set_setting("welcome_file_id", "")
-            db_set_setting("welcome_text", message.text)
-        else:
-            await message.reply_text("❌ Send text, photo, or video.")
-            return
-
-        context.user_data.pop("admin_action", None)
-        await message.reply_text("✅ Welcome message updated!")
-        return
-
     if action in ("ban_user", "unban_user"):
         if not message.text or not message.text.strip().isdigit():
             await message.reply_text("❌ Please send a numeric user ID.")
@@ -1159,26 +1122,6 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
 
-async def importmedia_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.effective_message
-    if not user or not message or not is_admin(user.id):
-        return
-    context.user_data["admin_action"] = "import_media"
-    await message.reply_text("📥 Send old welcome media. When finished, send /doneimport.")
-
-
-async def doneimport_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.effective_message
-    if not user or not message or not is_admin(user.id):
-        return
-    context.user_data.pop("admin_action", None)
-    with closing(db_connect()) as conn:
-        total = conn.execute("SELECT COUNT(*) FROM welcome_media").fetchone()[0]
-    await message.reply_text(f"✅ Total welcome media: {total}")
-
-
 async def mediastats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
@@ -1186,7 +1129,7 @@ async def mediastats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     with closing(db_connect()) as conn:
         total = conn.execute("SELECT COUNT(*) FROM welcome_media").fetchone()[0]
-    await message.reply_text(f"📊 Total welcome media: {total}")
+    await message.reply_text(f"📊 Total welcome media cached: {total}")
 
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1258,8 +1201,8 @@ async def post_init(application: Application):
     application.create_task(deletion_worker(application), name="deletion_worker")
     application.create_task(podcast_poster_worker(application), name="podcast_poster_worker")
     
-    # Start old videos scanning in background
-    application.create_task(scan_old_podcast_videos_pyrogram(), name="scan_old_podcast_videos_pyrogram")
+    # ব্যাকগ্রাউন্ডে টার্গেট চ্যানেল থেকে পুরোনো ছবি/ভিডিও স্ক্যান করার টাস্ক শুরু হবে
+    application.create_task(scan_old_media_and_podcasts_pyrogram(), name="scan_old_media_and_podcasts_pyrogram")
     logger.info("Database & workers initialized successfully.")
 
 
@@ -1275,12 +1218,10 @@ def main():
         .build()
     )
 
-    app.add_handler(handlers := CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("cancel", cancel_command))
-    app.add_handler(CommandHandler("importmedia", importmedia_command))
-    app.add_handler(CommandHandler("doneimport", doneimport_command))
     app.add_handler(CommandHandler("mediastats", mediastats_command))
     app.add_handler(CommandHandler("importpodcast", importpodcast_command))
 
