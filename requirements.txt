@@ -1,1 +1,3 @@
-pip install -U python-telegram-bot pyrogram tgcrypto
+python-telegram-bot>=20.0
+pyrogram
+tgcrypto
