@@ -7,7 +7,6 @@ from contextlib import closing
 from html import escape
 from urllib.parse import urlparse
 
-from pyrogram import Client as PyrogramClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError, Forbidden, RetryAfter, BadRequest
 from telegram.ext import (
@@ -16,12 +15,9 @@ from telegram.ext import (
 )
 
 # =========================================================
-# CONFIGURATION — fill these placeholders before running
+# CONFIGURATION — Your Credentials
 # =========================================================
 BOT_TOKEN = "8990092257:AAHio2Gi7JcrrWWweoKXofYRV4jd3nuLmJc"
-API_ID = 33511945
-API_HASH = "d044392a17690c14ee5b4a23651a0700"
-STRING_SESSION = "BQG2RvEAMqEZvxYVQSiqGgYnAD2bpddJ_Lez9m0iqkT_2NuFZxGCUEMp5fWuGMJuKk9nMy7OAk55brZMGQElagVIt0P1jOmxnu8EymXtZgZzk8lHupdjcHNsJYIezihx6RGPry_aNDGl_dLP1KlRbZ_KEAZk7NUw6GsX_-RUXHWQPtaLmfS7qH987xKAiGiVo7pBjVGyL7F9kZVxHFBKMwq9nHbOT3T5SGxfljYWh3Ntq-6VAfdznvqVyztz6CvZS1UvjEQPfewL4qgKqqbx5lT8d0adu-8uuC6FtaboN6GEVgVIetDC1lU1i7cAKh-wXOgFTLHLlDhqF6PXPzyxnqlmwMTU9wAAAAIL2oKZAA"
 
 ADMIN_ID = 8788804249
 BROADCAST_CHANNEL_ID = -1003785686277
@@ -78,7 +74,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-SCAN_LOCK = asyncio.Lock()
 
 
 # =========================================================
@@ -137,7 +132,6 @@ def setup_database():
             caption TEXT, added_at REAL NOT NULL
         )""")
 
-        # Migrate older databases that may lack these columns.
         cols = {r[1] for r in conn.execute("PRAGMA table_info(broadcast_users)").fetchall()}
         if "status" not in cols:
             conn.execute("ALTER TABLE broadcast_users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
@@ -358,10 +352,7 @@ async def send_welcome(bot, chat_id, user):
     try:
         if chosen:
             media_id, media_type, file_id, source_message_id = chosen
-            # Bot API file_ids are bot-specific. Use file_id for media collected by the bot;
-            # source_message_id is kept for reference and for scanner records.
             if file_id.startswith("source:") and source_message_id:
-                # Old media found by the user session is copied from the source channel.
                 copied = await bot.copy_message(
                     chat_id=chat_id,
                     from_chat_id=WELCOME_MEDIA_CHANNEL_ID,
@@ -562,7 +553,7 @@ async def confirmed_video_broadcaster_worker(application: Application):
 
 
 # =========================================================
-# CHANNEL POSTS + OLD HISTORY SCANNER
+# CHANNEL POSTS SCANNER (Real-time only)
 # =========================================================
 async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
@@ -601,78 +592,16 @@ async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await asyncio.sleep(0.03)
 
 
-async def scan_old_media_and_podcasts_pyrogram():
-    if SCAN_LOCK.locked():
-        logger.info("A scan is already running; skipping duplicate request.")
-        return 0, 0
-
-    async with SCAN_LOCK:
-        welcome_count = 0
-        podcast_count = 0
-        async with PyrogramClient(
-            "user_scanner_session",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            session_string=STRING_SESSION,
-        ) as pyro_app:
-            chat = await pyro_app.get_chat(PODCAST_SOURCE_CHANNEL_ID)
-            source_chat_id = chat.id
-            logger.info("Scanning old posts in source channel %s", source_chat_id)
-
-            async for message in pyro_app.get_chat_history(source_chat_id):
-                if message.photo:
-                    source_ref = f"source:{source_chat_id}:{message.id}"
-                    if save_welcome_media("photo", source_ref, message.id):
-                        welcome_count += 1
-                elif message.video:
-                    source_ref = f"source:{source_chat_id}:{message.id}"
-                    if save_welcome_media("video", source_ref, message.id):
-                        welcome_count += 1
-
-                is_video = bool(message.video) or bool(
-                    message.document and message.document.mime_type
-                    and message.document.mime_type.startswith("video/")
-                )
-                if is_video:
-                    with closing(db_connect()) as conn:
-                        cur = conn.execute("""INSERT OR IGNORE INTO podcast_videos
-                            (chat_id,message_id,added_at) VALUES (?,?,?)""",
-                            (source_chat_id, message.id, time.time()))
-                        conn.commit()
-                        if cur.rowcount > 0:
-                            podcast_count += 1
-
-        logger.info("Scan finished: %s welcome items; %s videos added",
-                    welcome_count, podcast_count)
-        return welcome_count, podcast_count
-
-
 async def importpodcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, message = update.effective_user, update.effective_message
     if not user or not message or not is_admin(user.id):
         if message:
             await message.reply_text("⛔ Admin access only.")
         return
-    status = await message.reply_text("⏳ Scanning old channel videos and welcome media...")
-    try:
-        welcome_added, videos_added = await scan_old_media_and_podcasts_pyrogram()
-        with closing(db_connect()) as conn:
-            total_welcome = conn.execute("SELECT COUNT(*) FROM welcome_media").fetchone()[0]
-            total_videos = conn.execute("SELECT COUNT(*) FROM podcast_videos").fetchone()[0]
-        await status.edit_text(
-            "✅ Scan completed.\n\n"
-            f"New welcome media: {welcome_added}\n"
-            f"New videos: {videos_added}\n"
-            f"Total welcome media: {total_welcome}\n"
-            f"Total saved videos: {total_videos}"
-        )
-    except Exception as error:
-        logger.exception("Import scan failed")
-        await status.edit_text(f"❌ Scan failed: {str(error)[:700]}")
+    await message.reply_text("ℹ️ String Session রিমুভ করার কারণে চ্যানেলের পুরোনো হিস্ট্রি স্ক্যান করার ফিচারটি বন্ধ করে দেওয়া হয়েছে।\n\nএখন থেকে চ্যানেলে শুধুমাত্র *নতুন* কোনো ভিডিও বা মিডিয়া দেওয়া হলে বট সেটি অটোমেটিক সেভ করে নেবে।")
 
 
 async def podcast_poster_worker(application: Application):
-    # First run after startup, then repeat every 30 minutes.
     await asyncio.sleep(20)
     while True:
         try:
@@ -961,7 +890,6 @@ async def post_init(application: Application):
     application.create_task(deletion_worker(application), name="deletion_worker")
     application.create_task(podcast_poster_worker(application), name="podcast_poster_worker")
     application.create_task(confirmed_video_broadcaster_worker(application), name="confirmed_video_broadcaster_worker")
-    application.create_task(scan_old_media_and_podcasts_pyrogram(), name="initial_media_scan")
     logger.info("Database and workers initialized.")
 
 
@@ -969,10 +897,8 @@ async def post_init(application: Application):
 # MAIN
 # =========================================================
 def main():
-    if BOT_TOKEN == "PASTE_NEW_BOT_TOKEN_HERE":
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         raise RuntimeError("Set BOT_TOKEN at the top of this file before starting.")
-    if API_HASH == "PASTE_API_HASH_HERE" or STRING_SESSION == "PASTE_NEW_STRING_SESSION_HERE":
-        raise RuntimeError("Set API_HASH and STRING_SESSION at the top of this file before starting.")
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
